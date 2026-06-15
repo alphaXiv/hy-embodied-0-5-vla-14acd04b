@@ -70,7 +70,7 @@ model:
   #   * True  -- full-segment isolation: image patches + split rows
   #     attend bidirectionally within the same visual segment and not
   #     outside. 
-  visual_segment_isolation: False
+  visual_segment_isolation: True
 
   # HuggingFace repo id (e.g. ``tencent/HY-Embodied-0.5``) or local directory
   # of the upstream Hy-Embodied VLM. Used by ``pretrain_source`` in
