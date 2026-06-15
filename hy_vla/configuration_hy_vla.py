@@ -146,7 +146,7 @@ class HyVLAConfig:
 
     # --- MEM video-encoder switch (paper arXiv:2603.03596v1) --------------
     use_video_encoder: bool = False
-    spacetime_layer_stride: int = 4
+    spacetime_layer_stride: int = 2
     past_drop_layer: int | None = None
 
     # Visual-segment attention mask scope. See
