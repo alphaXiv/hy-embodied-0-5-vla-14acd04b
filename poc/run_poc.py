@@ -131,8 +131,40 @@ def main():
     for k in IMG_KEYS + ["observation.state", "action"]:
         batch[k] = batch[k].to(device=DEV, dtype=DT)
 
-    with torch.no_grad():
-        info = policy.forward_evaluate(batch)
+    # ---- 2a) flow-matching num_steps sweep ----
+    # HyVLAFlowMatching.sample_actions uses ``dt = -1/policy.config.num_steps``
+    # so overriding the config field directly controls the Euler integrator's
+    # step count without touching the model weights.
+    sweep_steps_env = os.environ.get("HYVLA_NUM_STEPS_SWEEP", "1,2,4,10,20,40")
+    sweep_num_steps = [int(s) for s in sweep_steps_env.split(",") if s.strip()]
+    default_num_steps = int(policy.config.num_steps)
+    log(f"sweeping num_steps over {sweep_num_steps} (default={default_num_steps})")
+    sweep_results = []
+    info = None
+    for ns in sweep_num_steps:
+        policy.config.num_steps = ns
+        t_ns = time.time()
+        with torch.no_grad():
+            info_ns = policy.forward_evaluate(batch)
+        if DEV == "cuda":
+            torch.cuda.synchronize()
+        wall_ns = time.time() - t_ns
+        p_ns = info_ns["pred"].float().cpu()[..., :adim]
+        g_ns = info_ns["gt"].float().cpu()[..., :adim]
+        T_ns = min(p_ns.shape[1], g_ns.shape[1])
+        l1_ns = float(torch.mean(torch.abs(p_ns[:, :T_ns] - g_ns[:, :T_ns])))
+        log(f"  num_steps={ns:>3d}  model_l1={l1_ns:.4f}  wall={wall_ns:.2f}s")
+        sweep_results.append({
+            "num_steps": ns, "model_l1": l1_ns, "wall_clock_s": round(wall_ns, 3),
+        })
+        if ns == default_num_steps:
+            info = info_ns
+    # Restore default and ensure we have a default-num_steps ``info`` for the
+    # downstream report (re-run if the sweep skipped it).
+    policy.config.num_steps = default_num_steps
+    if info is None:
+        with torch.no_grad():
+            info = policy.forward_evaluate(batch)
     pred = info["pred"].float().cpu()
     gt = info["gt"].float().cpu()
     log(f"pred shape {tuple(pred.shape)}  gt shape {tuple(gt.shape)}")
@@ -169,6 +201,7 @@ def main():
         "ratio_model_over_shuffled": model_l1 / shuf_l1 if shuf_l1 else None,
         "wall_clock_s": round(time.time() - t0, 1),
         "n_params_billion": round(nparams / 1e9, 3),
+        "num_steps_sweep": sweep_results,
     }
     log("RESULTS: " + json.dumps(results, indent=2))
 
@@ -202,7 +235,15 @@ def main():
         f.write(f"| params | {results['n_params_billion']}B |\n")
         f.write(f"| wall clock | {results['wall_clock_s']}s |\n\n")
         f.write("PASS = model L1 < 0.5x predict-zeros AND < 0.6x mismatched-pair, "
-                "i.e. predictions are accurate and sample-specific.\n")
+                "i.e. predictions are accurate and sample-specific.\n\n")
+        f.write("## Flow-matching num_steps sweep\n\n")
+        f.write("Same batch, same noise sampling RNG (re-seeded only at the top of "
+                "main), varying `policy.config.num_steps` which controls "
+                "`dt = -1/num_steps` in the Euler integrator inside "
+                "`HyVLAFlowMatching.sample_actions`.\n\n")
+        f.write("| num_steps | model L1 | wall clock (s) |\n|---|---|---|\n")
+        for r in sweep_results:
+            f.write(f"| {r['num_steps']} | {r['model_l1']:.4f} | {r['wall_clock_s']:.2f} |\n")
 
     with open(os.path.join(ART, "results.json"), "w") as f:
         json.dump(results, f, indent=2)
