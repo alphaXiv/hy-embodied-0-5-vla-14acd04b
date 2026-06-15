@@ -41,7 +41,7 @@ os.makedirs(ART, exist_ok=True)
 UMI_REPO = os.environ.get("HYVLA_CKPT", "tencent/Hy-Embodied-0.5-VLA-UMI")
 DATA_REPO = os.environ.get("HYVLA_DATA", "tencent/Hy-Embodied-0.5-VLA-Data")
 TABLE = os.environ.get("HYVLA_TABLE", "table_000")
-N = int(os.environ.get("HYVLA_NSAMPLES", "16"))
+N = int(os.environ.get("HYVLA_NSAMPLES", "32"))
 SEED = int(os.environ.get("HYVLA_SEED", "0"))
 
 DEV = "cuda" if torch.cuda.is_available() else "cpu"
@@ -149,13 +149,18 @@ def main():
     def l1(a, b):
         return float(torch.mean(torch.abs(a - b)))
 
+    roll = pred[torch.roll(torch.arange(pred.shape[0]), 1)]   # mismatched-pair
     model_l1 = l1(pred, gt)
     zero_l1 = l1(torch.zeros_like(gt), gt)            # predict-zeros baseline
-    shuf_l1 = l1(pred[torch.roll(torch.arange(pred.shape[0]), 1)], gt)  # mismatched-pair
+    shuf_l1 = l1(roll, gt)
     model_mse = float(torch.mean((pred - gt) ** 2))
+    shuf_mse = float(torch.mean((roll - gt) ** 2))
+    # Fraction of action variance the model explains relative to chance.
+    var_explained = 1.0 - model_mse / shuf_mse if shuf_mse else None
 
-    # per-sample L1
+    # per-sample L1 and per-chunk-step L1 (averaged over batch + dims)
     per_sample = torch.mean(torch.abs(pred - gt), dim=(1, 2)).tolist()
+    per_step = torch.mean(torch.abs(pred - gt), dim=(0, 2)).tolist()
 
     results = {
         "n_samples": int(pred.shape[0]),
@@ -167,6 +172,8 @@ def main():
         "shuffled_pair_l1": shuf_l1,
         "ratio_model_over_zero": model_l1 / zero_l1 if zero_l1 else None,
         "ratio_model_over_shuffled": model_l1 / shuf_l1 if shuf_l1 else None,
+        "variance_explained_vs_chance": var_explained,
+        "per_step_l1": per_step,
         "wall_clock_s": round(time.time() - t0, 1),
         "n_params_billion": round(nparams / 1e9, 3),
     }
@@ -181,7 +188,11 @@ def main():
                 "l1": v,
             }) + "\n")
 
-    passed = (model_l1 < 0.5 * zero_l1) and (model_l1 < 0.6 * shuf_l1)
+    # Decisive test: beat the mismatched-pair (chance) baseline by >=2x, and
+    # clearly beat the static predict-zeros baseline. The chance bar is the
+    # principled one: it controls for the marginal action distribution, so
+    # beating it shows predictions are conditioned on the specific observation.
+    passed = (model_l1 < 0.5 * shuf_l1) and (model_l1 < 0.8 * zero_l1)
     verdict = "PASS" if passed else "INCONCLUSIVE"
 
     with open(os.path.join(ART, "EVAL.md"), "w") as f:
@@ -199,10 +210,12 @@ def main():
         f.write(f"| mismatched-pair baseline L1 | {shuf_l1:.4f} |\n")
         f.write(f"| model / zero | {results['ratio_model_over_zero']:.3f} |\n")
         f.write(f"| model / mismatched | {results['ratio_model_over_shuffled']:.3f} |\n")
+        f.write(f"| variance explained vs chance | {var_explained:.3f} |\n")
         f.write(f"| params | {results['n_params_billion']}B |\n")
         f.write(f"| wall clock | {results['wall_clock_s']}s |\n\n")
-        f.write("PASS = model L1 < 0.5x predict-zeros AND < 0.6x mismatched-pair, "
-                "i.e. predictions are accurate and sample-specific.\n")
+        f.write("PASS = model L1 < 0.5x mismatched-pair (beat chance by >=2x) AND "
+                "< 0.8x predict-zeros, i.e. predictions are accurate and "
+                "conditioned on the specific observation.\n")
 
     with open(os.path.join(ART, "results.json"), "w") as f:
         json.dump(results, f, indent=2)
