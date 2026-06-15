@@ -1,3 +1,23 @@
+## Implementation notes
+
+This fork adds a single-GPU proof-of-concept that verifies the core modeling claim: the released flow-matching VLA produces accurate, observation-conditioned continuous action chunks.
+
+```bash
+bash run.sh
+```
+
+Expect about 11 minutes on 1x H100 (~$0.60). The script installs the env with `uv`, loads `tencent/Hy-Embodied-0.5-VLA-UMI`, streams real episodes from `tencent/Hy-Embodied-0.5-VLA-Data`, and scores predicted vs ground-truth action chunks. See `poc/run_poc.py`.
+
+Result: normalized action-chunk L1 of 0.281, which is 3.4x lower than a mismatched-pair chance baseline and explains 83.7% of action variance.
+
+Takeaways for future runners:
+
+- The quickstart and `base.yaml` point at `tencent/Hy-VLA-*` repos that 401. The real names are `tencent/Hy-Embodied-0.5-VLA-*`.
+- `pyproject.toml` sets `license = { file = "License.txt" }` but the repo ships `LICENSE`, so plain `uv sync` fails. Use `uv sync --no-install-project` and import via `PYTHONPATH`.
+- The UMI checkpoint runs with eager attention and no video encoder, so flash-attn is never invoked. The checkpoint is self-contained via its embedded VLM config.
+
+---
+
 <div align="center">
 <h1>Hy-Embodied-0.5-VLA</h1>
 <p><b>From Vision-Language-Action Models to a Real-World Robot Learning Stack</b></p>
