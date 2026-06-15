@@ -154,6 +154,32 @@ def main():
     shuf_l1 = l1(pred[torch.roll(torch.arange(pred.shape[0]), 1)], gt)  # mismatched-pair
     model_mse = float(torch.mean((pred - gt) ** 2))
 
+    # ---- 3b) image-conditioning ablation: same batch, perturb the visual prefix ----
+    # If the action expert is genuinely using the images, replacing them with zeros
+    # or shuffling them across the batch should degrade L1 toward the trivial
+    # baselines. If L1 is unchanged, the model is coasting on state+language.
+    orig_imgs = {k: batch[k] for k in IMG_KEYS}
+    B = pred.shape[0]
+    shuffle_idx = torch.roll(torch.arange(B), 1)
+
+    try:
+        for k in IMG_KEYS:
+            batch[k] = torch.zeros_like(orig_imgs[k])
+        with torch.no_grad():
+            info_zi = policy.forward_evaluate(batch)
+        pred_zi = info_zi["pred"].float().cpu()[..., :adim][:, :T]
+        zero_img_l1 = l1(pred_zi, gt)
+
+        for k in IMG_KEYS:
+            batch[k] = orig_imgs[k][shuffle_idx]
+        with torch.no_grad():
+            info_si = policy.forward_evaluate(batch)
+        pred_si = info_si["pred"].float().cpu()[..., :adim][:, :T]
+        shuf_img_l1 = l1(pred_si, gt)
+    finally:
+        for k in IMG_KEYS:
+            batch[k] = orig_imgs[k]
+
     # per-sample L1
     per_sample = torch.mean(torch.abs(pred - gt), dim=(1, 2)).tolist()
 
@@ -165,8 +191,12 @@ def main():
         "model_mse": model_mse,
         "zero_baseline_l1": zero_l1,
         "shuffled_pair_l1": shuf_l1,
+        "zero_images_l1": zero_img_l1,
+        "shuffled_images_l1": shuf_img_l1,
         "ratio_model_over_zero": model_l1 / zero_l1 if zero_l1 else None,
         "ratio_model_over_shuffled": model_l1 / shuf_l1 if shuf_l1 else None,
+        "ratio_model_over_zero_images": model_l1 / zero_img_l1 if zero_img_l1 else None,
+        "ratio_model_over_shuffled_images": model_l1 / shuf_img_l1 if shuf_img_l1 else None,
         "wall_clock_s": round(time.time() - t0, 1),
         "n_params_billion": round(nparams / 1e9, 3),
     }
@@ -197,8 +227,12 @@ def main():
         f.write(f"| model MSE | {model_mse:.4f} |\n")
         f.write(f"| predict-zeros baseline L1 | {zero_l1:.4f} |\n")
         f.write(f"| mismatched-pair baseline L1 | {shuf_l1:.4f} |\n")
+        f.write(f"| zero-images ablation L1 | {zero_img_l1:.4f} |\n")
+        f.write(f"| shuffled-images ablation L1 | {shuf_img_l1:.4f} |\n")
         f.write(f"| model / zero | {results['ratio_model_over_zero']:.3f} |\n")
         f.write(f"| model / mismatched | {results['ratio_model_over_shuffled']:.3f} |\n")
+        f.write(f"| model / zero-images | {results['ratio_model_over_zero_images']:.3f} |\n")
+        f.write(f"| model / shuffled-images | {results['ratio_model_over_shuffled_images']:.3f} |\n")
         f.write(f"| params | {results['n_params_billion']}B |\n")
         f.write(f"| wall clock | {results['wall_clock_s']}s |\n\n")
         f.write("PASS = model L1 < 0.5x predict-zeros AND < 0.6x mismatched-pair, "
