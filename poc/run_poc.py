@@ -131,11 +131,33 @@ def main():
     for k in IMG_KEYS + ["observation.state", "action"]:
         batch[k] = batch[k].to(device=DEV, dtype=DT)
 
+    orig_tasks = list(batch["task"])
     with torch.no_grad():
         info = policy.forward_evaluate(batch)
     pred = info["pred"].float().cpu()
     gt = info["gt"].float().cpu()
     log(f"pred shape {tuple(pred.shape)}  gt shape {tuple(gt.shape)}")
+
+    # ---- language-conditioning ablation: same batch, perturbed instructions ----
+    # (a) empty strings, (b) instructions shuffled across the batch index.
+    rng = np.random.RandomState(SEED)
+    perm = np.arange(len(orig_tasks))
+    if len(orig_tasks) > 1:
+        # derangement-ish: keep shuffling until no index is fixed
+        for _ in range(16):
+            rng.shuffle(perm)
+            if not any(int(p) == i for i, p in enumerate(perm)):
+                break
+    shuf_tasks = [orig_tasks[int(p)] for p in perm]
+    empty_tasks = ["" for _ in orig_tasks]
+
+    batch["task"] = empty_tasks
+    with torch.no_grad():
+        pred_empty = policy.forward_evaluate(batch)["pred"].float().cpu()
+    batch["task"] = shuf_tasks
+    with torch.no_grad():
+        pred_shuflang = policy.forward_evaluate(batch)["pred"].float().cpu()
+    batch["task"] = orig_tasks
 
     # Align: keep the meaningful action dims and the overlapping chunk steps.
     pred = pred[..., :adim]
@@ -153,6 +175,11 @@ def main():
     model_l1 = l1(pred, gt)
     zero_l1 = l1(torch.zeros_like(gt), gt)            # predict-zeros baseline
     shuf_l1 = l1(roll, gt)
+    # language-conditioning ablation: same obs, perturbed task strings.
+    pred_empty_a = pred_empty[..., :adim][:, :T]
+    pred_shuflang_a = pred_shuflang[..., :adim][:, :T]
+    empty_lang_l1 = l1(pred_empty_a, gt)
+    shuf_lang_l1 = l1(pred_shuflang_a, gt)
     model_mse = float(torch.mean((pred - gt) ** 2))
     shuf_mse = float(torch.mean((roll - gt) ** 2))
     # Fraction of action variance the model explains relative to chance.
@@ -170,6 +197,8 @@ def main():
         "model_mse": model_mse,
         "zero_baseline_l1": zero_l1,
         "shuffled_pair_l1": shuf_l1,
+        "empty_lang_l1": empty_lang_l1,
+        "shuffled_lang_l1": shuf_lang_l1,
         "ratio_model_over_zero": model_l1 / zero_l1 if zero_l1 else None,
         "ratio_model_over_shuffled": model_l1 / shuf_l1 if shuf_l1 else None,
         "variance_explained_vs_chance": var_explained,
@@ -208,6 +237,8 @@ def main():
         f.write(f"| model MSE | {model_mse:.4f} |\n")
         f.write(f"| predict-zeros baseline L1 | {zero_l1:.4f} |\n")
         f.write(f"| mismatched-pair baseline L1 | {shuf_l1:.4f} |\n")
+        f.write(f"| empty-instruction L1 | {empty_lang_l1:.4f} |\n")
+        f.write(f"| shuffled-instruction L1 | {shuf_lang_l1:.4f} |\n")
         f.write(f"| model / zero | {results['ratio_model_over_zero']:.3f} |\n")
         f.write(f"| model / mismatched | {results['ratio_model_over_shuffled']:.3f} |\n")
         f.write(f"| variance explained vs chance | {var_explained:.3f} |\n")
